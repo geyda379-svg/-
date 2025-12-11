@@ -1,79 +1,651 @@
-// admin-bot.js - бот для управления ассортиментом через GitHub API
-const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
+// ============================================
+// АДМИН-БОТ ДЛЯ УПРАВЛЕНИЯ МАГАЗИНОМ
+// ============================================
 
-// Конфигурация
-const config = {
-    botToken: '8065054178:AAF3M3FHzWCRevhvL0m9XV0pTsp5bJcVUhk',
-    github: {
-        token: 'YOUR_GITHUB_TOKEN',
-        owner: 'YOUR_GITHUB_USERNAME',
-        repo: 'telegram-webapp-store',
-        branch: 'main',
-        filePath: 'products.json'
+const TelegramBot = require('node-telegram-bot-api');
+const { Octokit } = require('@octokit/rest');
+const axios = require('axios');
+
+// ============================================
+// НАСТРОЙКИ - ЗАПОЛНИТЕ ЭТИ ДАННЫЕ!
+// ============================================
+
+const CONFIG = {
+    // Токен бота от @BotFather
+    BOT_TOKEN: '6123456789:AAH1234567890abcdefghijklmnopqrstuvw',
+    
+    // GitHub настройки
+    GITHUB: {
+        // Токен из шага 2.1
+        TOKEN: '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',
+        // Ваш логин на GitHub
+        OWNER: 'geyda379-svg',
+        // Название репозитория
+        REPO: 'proba1',
+        // Ветка
+        BRANCH: 'main',
+        // Файл с товарами
+        FILE_PATH: 'products.json'
     },
-    adminIds: [YOUR_TELEGRAM_ID]
+    
+    // ID администраторов (ваш ID из @userinfobot)
+    ADMIN_IDS: [6403638379], // можно добавить несколько
+    
+    // Настройки магазина
+    SHOP: {
+        MAX_PRODUCTS: 1000,
+        DEFAULT_CATEGORIES: [
+            'electronics', 'clothes', 'books', 
+            'food', 'home', 'sports', 'other'
+        ],
+        CURRENCY: '₽'
+    }
 };
 
-const bot = new TelegramBot(config.botToken, { polling: true });
+// ============================================
+// ИНИЦИАЛИЗАЦИЯ
+// ============================================
 
-// Команда /start
-bot.onText(/\/start/, (msg) => {
+const bot = new TelegramBot(CONFIG.BOT_TOKEN, { 
+    polling: true,
+    filepath: false
+});
+
+const octokit = new Octokit({
+    auth: CONFIG.GITHUB.TOKEN
+});
+
+let productsCache = [];
+let userStates = {};
+
+// ============================================
+// ФУНКЦИИ ДЛЯ РАБОТЫ С GITHUB
+// ============================================
+
+// Получение текущих товаров
+async function getProducts() {
+    try {
+        const { data } = await octokit.repos.getContent({
+            owner: CONFIG.GITHUB.OWNER,
+            repo: CONFIG.GITHUB.REPO,
+            path: CONFIG.GITHUB.FILE_PATH,
+            ref: CONFIG.GITHUB.BRANCH
+        });
+        
+        const content = Buffer.from(data.content, 'base64').toString();
+        productsCache = JSON.parse(content || '[]');
+        return productsCache;
+    } catch (error) {
+        console.error('Ошибка получения товаров:', error);
+        return [];
+    }
+}
+
+// Сохранение товаров
+async function saveProducts(products) {
+    try {
+        // Получаем текущий файл для получения SHA
+        let sha;
+        try {
+            const { data } = await octokit.repos.getContent({
+                owner: CONFIG.GITHUB.OWNER,
+                repo: CONFIG.GITHUB.REPO,
+                path: CONFIG.GITHUB.FILE_PATH,
+                ref: CONFIG.GITHUB.BRANCH
+            });
+            sha = data.sha;
+        } catch (e) {
+            sha = null; // Файл не существует
+        }
+        
+        const content = Buffer.from(JSON.stringify(products, null, 2)).toString('base64');
+        
+        await octokit.repos.createOrUpdateFileContents({
+            owner: CONFIG.GITHUB.OWNER,
+            repo: CONFIG.GITHUB.REPO,
+            path: CONFIG.GITHUB.FILE_PATH,
+            message: '🛍️ Обновление ассортимента магазина',
+            content: content,
+            branch: CONFIG.GITHUB.BRANCH,
+            sha: sha
+        });
+        
+        productsCache = products;
+        return true;
+    } catch (error) {
+        console.error('Ошибка сохранения:', error);
+        return false;
+    }
+}
+
+// ============================================
+// КОМАНДЫ БОТА
+// ============================================
+
+// Команда /start - главное меню
+bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     
-    if (!config.adminIds.includes(chatId)) {
+    if (!CONFIG.ADMIN_IDS.includes(chatId)) {
         bot.sendMessage(chatId, '⛔ У вас нет доступа к этому боту.');
         return;
     }
     
-    const keyboard = {
+    await showMainMenu(chatId);
+});
+
+// Главное меню
+async function showMainMenu(chatId) {
+    const products = await getProducts();
+    const stats = await getShopStats();
+    
+    const menu = {
         reply_markup: {
             keyboard: [
-                ['📦 Добавить товар', '🗑️ Удалить товар'],
-                ['📋 Список товаров', '🔄 Обновить данные'],
-                ['ℹ️ Статус магазина']
+                ['📦 Добавить товар', '✏️ Редактировать товар'],
+                ['🗑️ Удалить товар', '📋 Список товаров'],
+                ['📊 Статистика', '⚙️ Настройки'],
+                ['🔄 Обновить данные', '📤 Экспорт товаров']
             ],
             resize_keyboard: true,
             one_time_keyboard: false
         }
     };
     
-    bot.sendMessage(chatId, '👋 Добро пожаловать в панель управления магазином!\n\nВыберите действие:', keyboard);
-});
+    const message = `👨‍💼 *Панель администратора*\n\n` +
+                   `📊 *Статистика магазина:*\n` +
+                   `🛍️ Товаров: ${stats.totalProducts}\n` +
+                   `💰 Общая стоимость: ${stats.totalValue} ${CONFIG.SHOP.CURRENCY}\n` +
+                   `📈 Категорий: ${stats.categories}\n\n` +
+                   `Выберите действие:`;
+    
+    bot.sendMessage(chatId, message, { 
+        parse_mode: 'Markdown',
+        ...menu 
+    });
+}
 
-// Добавление товара
+// ============================================
+// ДОБАВЛЕНИЕ ТОВАРА
+// ============================================
+
+// Обработка кнопки "📦 Добавить товар"
 bot.onText(/📦 Добавить товар/, async (msg) => {
     const chatId = msg.chat.id;
     
-    bot.sendMessage(chatId, 'Введите данные товара в формате:\n\n`Название | Цена | Категория | Описание`\n\nПример:\n`iPhone 15 | 99999 | electronics | Смартфон Apple`', {
-        parse_mode: 'Markdown'
-    });
+    userStates[chatId] = {
+        action: 'adding_product',
+        step: 1,
+        product: {}
+    };
+    
+    const categories = CONFIG.SHOP.DEFAULT_CATEGORIES.map(cat => 
+        `• ${getCategoryEmoji(cat)} ${cat}`
+    ).join('\n');
+    
+    bot.sendMessage(chatId, 
+        `🎯 *Добавление нового товара*\n\n` +
+        `Шаг 1/5: Введите *название товара*\n\n` +
+        `Примеры:\n` +
+        `• iPhone 15 Pro Max\n` +
+        `• Футболка черная\n` +
+        `• Книга "JavaScript для начинающих"`,
+        { parse_mode: 'Markdown' }
+    );
 });
 
-// Обработка текстовых сообщений с данными товара
+// Обработка шагов добавления товара
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
     
-    if (!config.adminIds.includes(chatId)) return;
+    if (!userStates[chatId] || CONFIG.ADMIN_IDS.indexOf(chatId) === -1) {
+        return;
+    }
     
-    // Проверяем формат данных товара
-    if (text.includes('|') && text.split('|').length >= 3) {
-        const parts = text.split('|').map(part => part.trim());
-        
-        if (parts.length >= 3) {
-            const [name, price, category, ...descriptionParts] = parts;
-            const description = descriptionParts.join('|') || 'Нет описания';
-            
-            // Создаем новый товар
-            const newProduct = {
-                id: 'product_' + Date.now(),
-                name: name,
-                price: parseFloat(price),
-                category: category.toLowerCase(),
-                description: description,
-                image: getEmojiForCategory(category),
+    const state = userStates[chatId];
+    
+    if (state.action === 'adding_product') {
+        switch (state.step) {
+            case 1: // Название
+                state.product.name = text;
+                state.step = 2;
+                bot.sendMessage(chatId,
+                    `✅ Название: *${text}*\n\n` +
+                    `Шаг 2/5: Введите *цену* в ${CONFIG.SHOP.CURRENCY}\n\n` +
+                    `Пример: 9999`,
+                    { parse_mode: 'Markdown' }
+                );
+                break;
+                
+            case 2: // Цена
+                const price = parseFloat(text.replace(',', '.'));
+                if (isNaN(price) || price <= 0) {
+                    bot.sendMessage(chatId, '❌ Неверная цена. Введите число больше 0:');
+                    return;
+                }
+                state.product.price = price;
+                state.step = 3;
+                
+                const categories = CONFIG.SHOP.DEFAULT_CATEGORIES.map((cat, index) => 
+                    `${index + 1}. ${getCategoryEmoji(cat)} ${cat}`
+                ).join('\n');
+                
+                bot.sendMessage(chatId,
+                    `✅ Цена: *${price} ${CONFIG.SHOP.CURRENCY}*\n\n` +
+                    `Шаг 3/5: Выберите *категорию*:\n\n${categories}\n\n` +
+                    `Отправьте номер категории или введите свою:`,
+                    { parse_mode: 'Markdown' }
+                );
+                break;
+                
+            case 3: // Категория
+                let category = text.toLowerCase();
+                const num = parseInt(text);
+                
+                if (!isNaN(num) && num > 0 && num <= CONFIG.SHOP.DEFAULT_CATEGORIES.length) {
+                    category = CONFIG.SHOP.DEFAULT_CATEGORIES[num - 1];
+                }
+                
+                state.product.category = category;
+                state.step = 4;
+                
+                bot.sendMessage(chatId,
+                    `✅ Категория: *${getCategoryEmoji(category)} ${category}*\n\n` +
+                    `Шаг 4/5: Введите *описание товара*\n\n` +
+                    `Можно использовать эмодзи и переносы строк\n` +
+                    `Пример: "Смартфон от Apple с чипом A17 Pro\\nПамять: 256 ГБ\\nЦвет: черный"`,
+                    { parse_mode: 'Markdown' }
+                );
+                break;
+                
+            case 4: // Описание
+                state.product.description = text;
+                state.step = 5;
+                
+                // Клавиатура для наличия на складе
+                const stockKeyboard = {
+                    reply_markup: {
+                        keyboard: [
+                            ['✅ В наличии', '⏳ Под заказ'],
+                            ['📦 Много', '🔄 Ограничено']
+                        ],
+                        resize_keyboard: true,
+                        one_time_keyboard: true
+                    }
+                };
+                
+                bot.sendMessage(chatId,
+                    `✅ Описание сохранено\n\n` +
+                    `Шаг 5/5: Укажите *количество на складе*\n\n` +
+                    `Можно отправить число или выбрать:`,
+                    { parse_mode: 'Markdown', ...stockKeyboard }
+                );
+                break;
+                
+            case 5: // Количество
+                let stock = parseInt(text);
+                if (isNaN(stock)) {
+                    switch(text) {
+                        case '✅ В наличии': stock = 100; break;
+                        case '⏳ Под заказ': stock = 0; break;
+                        case '📦 Много': stock = 50; break;
+                        case '🔄 Ограничено': stock = 10; break;
+                        default: stock = 1;
+                    }
+                }
+                
+                state.product.stock = stock;
+                state.product.id = 'prod_' + Date.now();
+                state.product.created_at = new Date().toISOString();
+                state.product.updated_at = new Date().toISOString();
+                
+                // Показываем превью и подтверждение
+                await showProductPreview(chatId, state.product);
+                break;
+        }
+    } else if (state.action === 'editing_product') {
+        // Логика редактирования
+        await handleProductEditing(chatId, text, state);
+    }
+});
 
-                created_at: new Date().toISOString(),
+// Превью и подтверждение добавления товара
+async function showProductPreview(chatId, product) {
+    const keyboard = {
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    { text: '✅ Сохранить товар', callback_data: 'save_product' },
+                    { text: '❌ Отменить', callback_data: 'cancel_product' }
+                ],
+                [
+                    { text: '✏️ Редактировать', callback_data: 'edit_product' }
+                ]
+            ]
+        }
+    };
+    
+    const message = `📋 *ПРЕВЬЮ ТОВАРА*\n\n` +
+                   `🆔 ID: \`${product.id}\`\n` +
+                   `📦 Название: *${product.name}*\n` +
+                   `💰 Цена: *${product.price} ${CONFIG.SHOP.CURRENCY}*\n` +
+                   `📁 Категория: ${getCategoryEmoji(product.category)} *${product.category}*\n` +
+                   `📝 Описание:\n${product.description}\n` +
+                   `📊 На складе: *${product.stock} шт.*\n\n` +
+                   `Сохранить товар?`;
+    
+    bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown',
+        ...keyboard
+    });
+}
+
+// ============================================
+// УДАЛЕНИЕ ТОВАРА
+// ============================================
+
+// Обработка кнопки "🗑️ Удалить товар"
+bot.onText(/🗑️ Удалить товар/, async (msg) => {
+    const chatId = msg.chat.id;
+    const products = await getProducts();
+    
+    if (products.length === 0) {
+        bot.sendMessage(chatId, '📭 Магазин пуст. Нечего удалять.');
+        return;
+    }
+    
+    userStates[chatId] = {
+        action: 'deleting_product',
+        products: products
+    };
+    
+    // Показываем список товаров для удаления
+    const productList = products.slice(0, 50).map((p, i) => 
+        `${i + 1}. ${p.name} - ${p.price} ${CONFIG.SHOP.CURRENCY}`
+    ).join('\n');
+    
+    const message = `🗑️ *Удаление товара*\n\n` +
+                   `Товаров найдено: ${products.length}\n\n` +
+                   `${productList}\n\n` +
+                   `Отправьте *номер товара* для удаления или *ID товара*:`;
+    
+    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
+
+// ============================================
+// СПИСОК ТОВАРОВ
+// ============================================
+
+// Обработка кнопки "📋 Список товаров"
+bot.onText(/📋 Список товаров/, async (msg) => {
+    const chatId = msg.chat.id;
+    const products = await getProducts();
+    
+    if (products.length === 0) {
+        bot.sendMessage(chatId, '📭 Магазин пуст. Добавьте первый товар!');
+        return;
+    }
+    
+    // Группируем по категориям
+    const categories = {};
+    products.forEach(product => {
+        if (!categories[product.category]) {
+            categories[product.category] = [];
+        }
+        categories[product.category].push(product);
+    });
+    
+    let message = `📊 *АССОРТИМЕНТ МАГАЗИНА*\n\n` +
+                 `Всего товаров: ${products.length}\n\n`;
+    
+    for (const [category, items] of Object.entries(categories)) {
+        message += `${getCategoryEmoji(category)} *${category.toUpperCase()}* (${items.length}):\n`;
+        items.slice(0, 5).forEach(item => {
+            message += `• ${item.name} - ${item.price} ${CONFIG.SHOP.CURRENCY}\n`;
+        });
+        if (items.length > 5) {
+            message += `... и еще ${items.length - 5} товаров\n`;
+        }
+        message += '\n';
+    }
+    
+    // Клавиатура с действиями
+    const keyboard = {
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    { text: '📥 Экспорт в CSV', callback_data: 'export_csv' },
+                    { text: '📤 Экспорт в JSON', callback_data: 'export_json' }
+                ],
+                [
+                    { text: '🔄 Обновить цены', callback_data: 'update_prices' },
+                    { text: '📈 Статистика', callback_data: 'show_stats' }
+                ]
+            ]
+        }
+    };
+    
+    bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown',
+        ...keyboard
+    });
+});
+
+// ============================================
+// СТАТИСТИКА
+// ============================================
+
+// Обработка кнопки "📊 Статистика"
+bot.onText(/📊 Статистика/, async (msg) => {
+    const chatId = msg.chat.id;
+    const stats = await getShopStats();
+    
+    const message = `📈 *СТАТИСТИКА МАГАЗИНА*\n\n` +
+                   `🛍️ Всего товаров: ${stats.totalProducts}\n` +
+                   `💰 Общая стоимость: ${stats.totalValue} ${CONFIG.SHOP.CURRENCY}\n` +
+                   `📈 Средняя цена: ${stats.averagePrice} ${CONFIG.SHOP.CURRENCY}\n` +
+                   `📊 Категорий: ${stats.categories}\n` +
+                   `📅 Последнее обновление: ${stats.lastUpdate}\n\n` +
+                   `🏆 *Топ товаров по цене:*\n` +
+                   `${stats.topExpensive.map((p, i) => 
+                       `${i + 1}. ${p.name} - ${p.price} ${CONFIG.SHOP.CURRENCY}`
+                   ).join('\n')}`;
+    
+    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
+
+// ============================================
+// ОБРАБОТКА CALLBACK-QUERY (кнопки под сообщениями)
+// ============================================
+
+bot.on('callback_query', async (callbackQuery) => {
+    const chatId = callbackQuery.message.chat.id;
+    const data = callbackQuery.data;
+    
+    try {
+        switch(data) {
+            case 'save_product':
+                const state = userStates[chatId];
+                if (state && state.product) {
+                    const products = await getProducts();
+                    products.push(state.product);
+                    const saved = await saveProducts(products);
+                    
+                    if (saved) {
+                        bot.answerCallbackQuery(callbackQuery.id, { text: '✅ Товар сохранен!' });
+                        bot.editMessageText(
+                            `✅ Товар успешно добавлен в магазин!\n\n` +
+                            `📦 *${state.product.name}*\n` +
+                            `💰 ${state.product.price} ${CONFIG.SHOP.CURRENCY}\n\n` +
+                            `Магазин обновлен автоматически.`,
+                            {
+                                chat_id: chatId,
+                                message_id: callbackQuery.message.message_id,
+                                parse_mode: 'Markdown'
+                            }
+                        );
+                        delete userStates[chatId];
+                    }
+                }
+                break;
+                
+            case 'cancel_product':
+                bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
+                bot.editMessageText('❌ Добавление товара отменено.', {
+                    chat_id: chatId,
+                    message_id: callbackQuery.message.message_id
+                });
+                delete userStates[chatId];
+                break;
+                
+            case 'export_csv':
+                await exportToCSV(chatId);
+                bot.answerCallbackQuery(callbackQuery.id);
+                break;
+                
+            case 'export_json':
+                await exportToJSON(chatId);
+                bot.answerCallbackQuery(callbackQuery.id);
+                break;
+        }
+    } catch (error) {
+        console.error('Ошибка обработки callback:', error);
+        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Ошибка' });
+    }
+});
+
+// ============================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================
+
+// Получение эмодзи для категории
+function getCategoryEmoji(category) {
+    const emojis = {
+        'electronics': '📱',
+        'clothes': '👕',
+        'books': '📚',
+        'food': '🍔',
+        'home': '🏠',
+        'sports': '⚽',
+        'other': '📦'
+    };
+    return emojis[category] || '📦';
+}
+
+// Получение статистики магазина
+async function getShopStats() {
+    const products = await getProducts();
+    
+    if (products.length === 0) {
+        return {
+            totalProducts: 0,
+            totalValue: 0,
+            averagePrice: 0,
+            categories: 0,
+            lastUpdate: 'никогда',
+            topExpensive: []
+        };
+    }
+    
+    const categories = new Set(products.map(p => p.category));
+    const totalValue = products.reduce((sum, p) => sum + (p.price || 0), 0);
+    const averagePrice = Math.round(totalValue / products.length);
+    
+    // Топ 5 самых дорогих товаров
+    const topExpensive = [...products]
+        .sort((a, b) => b.price - a.price)
+        .slice(0, 5);
+    
+    // Последнее обновление
+    const lastUpdate = products.length > 0 
+        ? new Date(products[products.length - 1].updated_at || products[products.length - 1].created_at)
+            .toLocaleString('ru-RU')
+        : 'никогда';
+    
+    return {
+        totalProducts: products.length,
+        totalValue: totalValue,
+        averagePrice: averagePrice,
+        categories: categories.size,
+        lastUpdate: lastUpdate,
+        topExpensive: topExpensive
+    };
+}
+
+// Экспорт в CSV
+async function exportToCSV(chatId) {
+    const products = await getProducts();
+    
+    if (products.length === 0) {
+        bot.sendMessage(chatId, '📭 Нет товаров для экспорта.');
+        return;
+    }
+    
+    // Создаем CSV
+    const headers = ['ID', 'Название', 'Цена', 'Категория', 'На складе', 'Дата создания'];
+    const csvRows = [headers.join(',')];
+    
+    products.forEach(product => {
+        const row = [
+            `"${product.id}"`,
+            `"${product.name}"`,
+            product.price,
+            `"${product.category}"`,
+            product.stock || 0,
+            `"${product.created_at}"`
+        ];
+        csvRows.push(row.join(','));
+    });
+    
+    const csvContent = csvRows.join('\n');
+    
+    // Отправляем файл
+    bot.sendDocument(chatId, Buffer.from(csvContent), {
+        caption: '📥 Экспорт товаров в CSV',
+        filename: `products_${new Date().toISOString().slice(0, 10)}.csv`
+    });
+}
+
+// Экспорт в JSON
+async function exportToJSON(chatId) {
+    const products = await getProducts();
+    
+    if (products.length === 0) {
+        bot.sendMessage(chatId, '📭 Нет товаров для экспорта.');
+        return;
+    }
+    
+    const jsonContent = JSON.stringify(products, null, 2);
+    
+    bot.sendDocument(chatId, Buffer.from(jsonContent), {
+        caption: '📥 Экспорт товаров в JSON',
+        filename: `products_${new Date().toISOString().slice(0, 10)}.json`
+    });
+}
+
+// ============================================
+// ЗАПУСК БОТА
+// ============================================
+
+console.log('🤖 Админ-бот запущен...');
+console.log('📊 Мониторинг сообщений...');
+
+// Обработка ошибок
+bot.on('polling_error', (error) => {
+    console.error('Ошибка polling:', error.code);
+});
+
+bot.on('webhook_error', (error) => {
+    console.error('Ошибка webhook:', error.message);
+});
+
+// Запускаем проверку доступности
+setInterval(async () => {
+    try {
+        const stats = await getShopStats();
+        console.log(`🔄 Бот активен. Товаров: ${stats.totalProducts}`);
+    } catch (error) {
+        console.error('Ошибка проверки статуса:', error.message);
+    }
+}, 300000); // Каждые 5 минут
