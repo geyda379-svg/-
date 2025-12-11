@@ -6,7 +6,7 @@ const path = require('path');
 
 // Конфигурация
 const config = {
-    botToken: 'YOUR_ADMIN_BOT_TOKEN',
+    botToken: '8065054178:AAF3M3FHzWCRevhvL0m9XV0pTsp5bJcVUhk',
     github: {
         token: 'YOUR_GITHUB_TOKEN',
         owner: 'YOUR_GITHUB_USERNAME',
@@ -75,4 +75,5 @@ bot.on('message', async (msg) => {
                 category: category.toLowerCase(),
                 description: description,
                 image: getEmojiForCategory(category),
+
                 created_at: new Date().toISOString(),
